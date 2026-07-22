@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
+import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { extractedEntrySchema } from "../../../backend/src/schema";
 
@@ -17,23 +18,27 @@ Nunca diagnostique, prescreva ou trate correlação como causalidade.
 Responda em português natural, reconheça dificuldades sem moralizar e faça no máximo uma pergunta curta.
 Retorne JSON com as chaves conversation_reply e entry.`;
 
+const assistantResponseSchema = z.object({
+  conversation_reply: z.string().min(1).max(2_000),
+  entry: extractedEntrySchema,
+});
+
 async function interpretEntry(text: string, date: string, context: unknown) {
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
     maxRetries: 0,
     timeout: 20_000,
   });
-  const response = await client.responses.create({
+  const response = await client.responses.parse({
     model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
     input: [
       { role: "system", content: systemPrompt },
       { role: "user", content: [`Data local: ${date}`, `Contexto cadastrado pelo usuário: ${JSON.stringify(context)}`, `Relato de hoje: ${text}`].join("\n") },
     ],
-    text: { format: { type: "json_object" } },
+    text: { format: zodTextFormat(assistantResponseSchema, "daily_entry") },
   });
-  const parsed = JSON.parse(response.output_text) as { conversation_reply?: unknown; entry?: unknown };
-  if (typeof parsed.conversation_reply !== "string") throw new Error("Resposta conversacional inválida");
-  return { conversation_reply: parsed.conversation_reply, entry: extractedEntrySchema.parse(parsed.entry) };
+  if (!response.output_parsed) throw new Error("Resposta estruturada ausente");
+  return response.output_parsed;
 }
 
 export async function POST(request: Request) {

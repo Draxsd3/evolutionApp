@@ -24,12 +24,11 @@ export const extractedEntrySchema = z
           quality_score: optionalScore,
         }),
       )
-      .max(12)
-      .default([]),
-    achievements: z.array(z.string().max(300)).max(20).default([]),
-    difficulties: z.array(z.string().max(300)).max(20).default([]),
-    tags: z.array(z.string().max(60)).max(20).default([]),
-    next_action: z.string().max(300).nullable().default(null),
+      .max(12),
+    achievements: z.array(z.string().max(300)).max(20),
+    difficulties: z.array(z.string().max(300)).max(20),
+    tags: z.array(z.string().max(60)).max(20),
+    next_action: z.string().max(300).nullable(),
   })
   .strict();
 
