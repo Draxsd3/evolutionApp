@@ -18,7 +18,11 @@ Responda em português natural, reconheça dificuldades sem moralizar e faça no
 Retorne JSON com as chaves conversation_reply e entry.`;
 
 async function interpretEntry(text: string, date: string, context: unknown) {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const client = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+    maxRetries: 0,
+    timeout: 20_000,
+  });
   const response = await client.responses.create({
     model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
     input: [
@@ -138,9 +142,16 @@ export async function POST(request: Request) {
         : undefined,
     });
     const invalidRequest = error instanceof z.ZodError;
+    const quotaUnavailable = details.code === "insufficient_quota";
     return NextResponse.json(
-      { error: invalidRequest ? "Relato inválido" : "Não foi possível registrar agora. Tente novamente." },
-      { status: invalidRequest ? 400 : 500 },
+      {
+        error: invalidRequest
+          ? "Relato inválido"
+          : quotaUnavailable
+            ? "A IA está sem créditos disponíveis no momento. Tente novamente após atualizar a conta da OpenAI."
+            : "Não foi possível registrar agora. Tente novamente.",
+      },
+      { status: invalidRequest ? 400 : quotaUnavailable ? 503 : 500 },
     );
   }
 }
