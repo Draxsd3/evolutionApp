@@ -3,47 +3,10 @@
 import { Check, Mic, MicOff, Pause, Play, ShieldCheck, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type VoiceState = "consent" | "starting" | "listening" | "paused" | "denied" | "unsupported" | "error";
-
-interface SpeechRecognitionResultLike {
-  isFinal: boolean;
-  [index: number]: { transcript: string };
-}
-
-interface SpeechRecognitionEventLike extends Event {
-  resultIndex: number;
-  results: { length: number; [index: number]: SpeechRecognitionResultLike };
-}
-
-interface SpeechRecognitionErrorLike extends Event {
-  error: string;
-}
-
-interface SpeechRecognitionLike {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  start(): void;
-  stop(): void;
-  abort(): void;
-  onstart: (() => void) | null;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((event: SpeechRecognitionErrorLike) => void) | null;
-  onend: (() => void) | null;
-}
-
-interface SpeechRecognitionConstructor {
-  new (): SpeechRecognitionLike;
-}
-
-declare global {
-  interface Window {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  }
-}
+type VoiceState = "consent" | "starting" | "listening" | "transcribing" | "paused" | "denied" | "unsupported" | "quota" | "error";
 
 interface VoiceCaptureProps {
+  token: string;
   onClose: () => void;
   onUseTranscript: (transcript: string) => void;
 }
@@ -52,9 +15,11 @@ const stateCopy: Record<VoiceState, string> = {
   consent: "Antes de começar",
   starting: "Preparando o microfone…",
   listening: "Ouvindo",
+  transcribing: "Transcrevendo…",
   paused: "Pausado",
   denied: "Microfone bloqueado",
   unsupported: "Navegador incompatível",
+  quota: "Transcrição indisponível",
   error: "Não foi possível transcrever",
 };
 
@@ -62,97 +27,121 @@ function joinTranscript(current: string, addition: string) {
   return [current.trim(), addition.trim()].filter(Boolean).join(" ");
 }
 
-export function VoiceCapture({ onClose, onUseTranscript }: VoiceCaptureProps) {
-  const [voiceState, setVoiceState] = useState<VoiceState>("consent");
-  const [finalText, setFinalText] = useState("");
-  const [interimText, setInterimText] = useState("");
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
-  const shouldListenRef = useRef(false);
-  const closingRef = useRef(false);
+function preferredMimeType() {
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
+}
 
-  const stopRecognition = useCallback((abort = false) => {
-    shouldListenRef.current = false;
-    const recognition = recognitionRef.current;
-    if (!recognition) return;
-    if (abort) recognition.abort();
-    else recognition.stop();
+export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCaptureProps) {
+  const [voiceState, setVoiceState] = useState<VoiceState>("consent");
+  const [transcript, setTranscript] = useState("");
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const discardRef = useRef(false);
+
+  const releaseMicrophone = useCallback(() => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    recorderRef.current = null;
   }, []);
 
   const close = useCallback(() => {
-    closingRef.current = true;
-    stopRecognition(true);
+    discardRef.current = true;
+    const recorder = recorderRef.current;
+    if (recorder?.state === "recording") recorder.stop();
+    releaseMicrophone();
     onClose();
-  }, [onClose, stopRecognition]);
+  }, [onClose, releaseMicrophone]);
 
-  const createRecognition = useCallback(() => {
-    const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
-    if (!Recognition) {
-      setVoiceState("unsupported");
-      return null;
+  const transcribe = useCallback(async (blob: Blob) => {
+    if (blob.size < 1_000) {
+      setVoiceState("paused");
+      return;
     }
+    setVoiceState("transcribing");
+    const extension = blob.type.includes("mp4") ? "m4a" : "webm";
+    const form = new FormData();
+    form.append("audio", blob, `relato.${extension}`);
 
-    const recognition = new Recognition();
-    recognition.lang = "pt-BR";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.onstart = () => setVoiceState("listening");
-    recognition.onresult = (event) => {
-      let confirmed = "";
-      let partial = "";
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const transcript = result[0]?.transcript ?? "";
-        if (result.isFinal) confirmed = joinTranscript(confirmed, transcript);
-        else partial = joinTranscript(partial, transcript);
-      }
-      if (confirmed) setFinalText((current) => joinTranscript(current, confirmed));
-      setInterimText(partial);
-    };
-    recognition.onerror = (event) => {
-      if (event.error === "aborted" && closingRef.current) return;
-      shouldListenRef.current = false;
-      setInterimText("");
-      setVoiceState(event.error === "not-allowed" || event.error === "service-not-allowed" ? "denied" : "error");
-    };
-    recognition.onend = () => {
-      if (closingRef.current || !shouldListenRef.current) return;
-      window.setTimeout(() => {
-        if (!closingRef.current && shouldListenRef.current) {
-          try { recognition.start(); } catch { setVoiceState("error"); }
-        }
-      }, 250);
-    };
-    recognitionRef.current = recognition;
-    return recognition;
-  }, []);
-
-  const start = useCallback(() => {
-    closingRef.current = false;
-    setVoiceState("starting");
-    shouldListenRef.current = true;
-    const recognition = recognitionRef.current ?? createRecognition();
-    if (!recognition) return;
     try {
-      recognition.start();
+      const response = await fetch("/api/transcribe", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      const result = await response.json() as { text?: string; error?: string; code?: string };
+      if (!response.ok) {
+        setVoiceState(result.code === "insufficient_quota" ? "quota" : "error");
+        return;
+      }
+      setTranscript((current) => joinTranscript(current, result.text ?? ""));
+      setVoiceState("paused");
     } catch {
-      shouldListenRef.current = false;
       setVoiceState("error");
     }
-  }, [createRecognition]);
+  }, [token]);
+
+  const start = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setVoiceState("unsupported");
+      return;
+    }
+    setVoiceState("starting");
+    discardRef.current = false;
+    chunksRef.current = [];
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      const mimeType = preferredMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      streamRef.current = stream;
+      recorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        releaseMicrophone();
+        setVoiceState("error");
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        chunksRef.current = [];
+        releaseMicrophone();
+        if (!discardRef.current) void transcribe(blob);
+      };
+      recorder.start(500);
+      setRecordingSeconds(0);
+      setVoiceState("listening");
+    } catch (error) {
+      releaseMicrophone();
+      const permissionDenied = error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "SecurityError");
+      setVoiceState(permissionDenied ? "denied" : "error");
+    }
+  }, [releaseMicrophone, transcribe]);
 
   function pause() {
-    stopRecognition();
-    setInterimText("");
-    setVoiceState("paused");
+    const recorder = recorderRef.current;
+    if (recorder?.state === "recording") recorder.stop();
   }
 
   function useTranscript() {
-    const transcript = joinTranscript(finalText, interimText);
-    if (!transcript) return;
-    closingRef.current = true;
-    stopRecognition();
-    onUseTranscript(transcript);
+    if (!transcript.trim()) return;
+    releaseMicrophone();
+    onUseTranscript(transcript.trim());
   }
+
+  useEffect(() => {
+    if (voiceState !== "listening") return;
+    const timer = window.setInterval(() => setRecordingSeconds((seconds) => seconds + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, [voiceState]);
+
+  useEffect(() => {
+    if (recordingSeconds >= 300 && recorderRef.current?.state === "recording") pause();
+  }, [recordingSeconds]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -160,14 +149,16 @@ export function VoiceCapture({ onClose, onUseTranscript }: VoiceCaptureProps) {
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => {
-      closingRef.current = true;
-      stopRecognition(true);
+      discardRef.current = true;
+      if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+      releaseMicrophone();
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [close, stopRecognition]);
+  }, [close, releaseMicrophone]);
 
-  const transcript = joinTranscript(finalText, interimText);
-  const active = voiceState === "listening" || voiceState === "starting";
+  const active = voiceState === "listening" || voiceState === "starting" || voiceState === "transcribing";
+  const minutes = Math.floor(recordingSeconds / 60).toString().padStart(2, "0");
+  const seconds = (recordingSeconds % 60).toString().padStart(2, "0");
 
   return <div className="voice-backdrop" role="presentation">
     <section className="voice-panel" role="dialog" aria-modal="true" aria-labelledby="voice-title" aria-describedby="voice-description">
@@ -177,44 +168,36 @@ export function VoiceCapture({ onClose, onUseTranscript }: VoiceCaptureProps) {
         <div className="voice-privacy-icon"><ShieldCheck size={25}/></div>
         <p className="eyebrow">PRIVACIDADE DA VOZ</p>
         <h2 id="voice-title">Fale do seu jeito</h2>
-        <p id="voice-description" className="voice-description">O microfone só será ativado após sua confirmação. O navegador processa sua fala para gerar a transcrição; o Evolua não armazena o áudio original. Somente o texto que você confirmar será enviado.</p>
+        <p id="voice-description" className="voice-description">O microfone só será ativado após sua confirmação. O áudio será enviado com segurança apenas para gerar a transcrição e não será armazenado pelo Evolua. Somente o texto que você confirmar será salvo.</p>
         <div className="voice-actions consent-actions">
           <button className="voice-secondary" onClick={close}>Agora não</button>
-          <button className="voice-primary" onClick={start}><Mic size={18}/> Ativar microfone</button>
+          <button className="voice-primary" onClick={() => void start()} autoFocus><Mic size={18}/> Ativar microfone</button>
         </div>
       </> : <>
-        <div className={`voice-indicator ${active ? "active" : ""}`} aria-hidden="true">
-          <span/><span/><span/><span/>
-        </div>
-        <p className="voice-state" aria-live="polite">{stateCopy[voiceState]}</p>
+        <div className={`voice-indicator ${voiceState === "listening" ? "active" : ""}`} aria-hidden="true"><span/><span/><span/><span/></div>
+        <p className="voice-state" aria-live="polite">{stateCopy[voiceState]}{voiceState === "listening" ? ` · ${minutes}:${seconds}` : ""}</p>
         <h2 id="voice-title">Conversa por voz</h2>
         <p id="voice-description" className="voice-description">
-          {voiceState === "listening" && "Fale naturalmente. Você pode pausar a qualquer momento."}
+          {voiceState === "listening" && "Fale naturalmente. Ao pausar, seu áudio será transcrito."}
           {voiceState === "paused" && "Revise ou edite a transcrição antes de usar no chat."}
-          {voiceState === "starting" && "Aguardando a permissão e preparando a captura."}
-          {voiceState === "denied" && "Permita o acesso ao microfone nas configurações do navegador e tente novamente."}
-          {voiceState === "unsupported" && "Use uma versão recente do Chrome, Edge ou Safari para ditar seu relato."}
+          {voiceState === "starting" && "Aguardando sua permissão para usar o microfone."}
+          {voiceState === "transcribing" && "Convertendo sua fala em texto. O áudio será descartado em seguida."}
+          {voiceState === "denied" && "Permita o microfone nas configurações do navegador e tente novamente."}
+          {voiceState === "unsupported" && "Este navegador não permite capturar áudio. Use uma versão recente do Chrome, Edge ou Safari."}
+          {voiceState === "quota" && "A conta da OpenAI está sem créditos para transcrever. Seu áudio não foi armazenado."}
           {voiceState === "error" && "Verifique sua conexão e tente iniciar a captura novamente."}
         </p>
 
         <label className="voice-transcript-label" htmlFor="voice-transcript">Transcrição</label>
-        <textarea
-          id="voice-transcript"
-          className="voice-transcript"
-          value={transcript}
-          onChange={(event) => { setFinalText(event.target.value); setInterimText(""); }}
-          disabled={active}
-          placeholder={active ? "Comece a falar…" : "Sua fala aparecerá aqui."}
-          rows={5}
-        />
+        <textarea id="voice-transcript" className="voice-transcript" value={transcript} onChange={(event) => setTranscript(event.target.value)} disabled={active} placeholder={voiceState === "listening" ? "Sua fala será transcrita ao pausar…" : "Sua fala aparecerá aqui."} rows={5}/>
 
         <div className="voice-controls">
-          {active ? <button className="voice-control" onClick={pause}><Pause size={20}/><span>Pausar</span></button>
-            : <button className="voice-control" onClick={start}><Play size={20}/><span>{voiceState === "paused" ? "Retomar" : "Tentar novamente"}</span></button>}
+          {voiceState === "listening" ? <button className="voice-control" onClick={pause}><Pause size={20}/><span>Pausar</span></button>
+            : <button className="voice-control" onClick={() => void start()} disabled={voiceState === "starting" || voiceState === "transcribing"}><Play size={20}/><span>{voiceState === "paused" ? "Continuar" : "Tentar novamente"}</span></button>}
           <button className="voice-control danger" onClick={close}><MicOff size={20}/><span>Cancelar</span></button>
-          <button className="voice-control confirm" onClick={useTranscript} disabled={!transcript.trim()}><Check size={20}/><span>Usar texto</span></button>
+          <button className="voice-control confirm" onClick={useTranscript} disabled={!transcript.trim() || active}><Check size={20}/><span>Usar texto</span></button>
         </div>
-        <p className="voice-storage-note">Áudio original não armazenado · Transcrição editável</p>
+        <p className="voice-storage-note">Limite de 5 minutos por trecho · Áudio descartado após transcrição</p>
       </>}
     </section>
   </div>;

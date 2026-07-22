@@ -98,7 +98,7 @@ function ChatView({ data, name, token, onSaved }: ChatViewProps) {
       <div ref={end}/>
     </div>
     <div className="composer-wrap"><div className="composer"><label htmlFor="daily-text" className="sr-only">Conte como foi seu dia</label><textarea id="daily-text" value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="Conte como foi seu dia…" rows={1}/><div className="composer-actions"><button className="mic" onClick={() => setVoiceOpen(true)} disabled={sending} aria-label="Conversar por voz" aria-haspopup="dialog" aria-expanded={voiceOpen}><Mic size={20}/></button><span>Shift + Enter para nova linha</span><button className="send" onClick={() => void send()} disabled={!text.trim() || sending} aria-label="Enviar mensagem"><ArrowUp size={20}/></button></div></div><p className="privacy-note">Seu relato é privado e pode ser corrigido ou excluído.</p></div>
-    {voiceOpen && <VoiceCapture onClose={() => setVoiceOpen(false)} onUseTranscript={(transcript) => { setText((current) => [current.trim(), transcript.trim()].filter(Boolean).join(" ")); setVoiceOpen(false); }}/>} 
+    {voiceOpen && <VoiceCapture token={token} onClose={() => setVoiceOpen(false)} onUseTranscript={(transcript) => { setText((current) => [current.trim(), transcript.trim()].filter(Boolean).join(" ")); setVoiceOpen(false); }}/>} 
   </div>;
 }
 
