@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabase } from "../lib/supabase";
 import { loadAppData, setRoutineCompleted } from "../lib/data";
 import type { AppData, AuthenticatedAppProps, DailyEntry, View } from "../types";
+import { VoiceCapture } from "./VoiceCapture";
 
 const nav = [
   { id: "chat", label: "Conversa", icon: MessageCircle },
@@ -55,6 +56,7 @@ function ChatView({ data, name, token, onSaved }: ChatViewProps) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const end = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -95,7 +97,8 @@ function ChatView({ data, name, token, onSaved }: ChatViewProps) {
       {error && <div className="inline-error" role="alert">{error} <button onClick={send}>Tentar novamente</button></div>}
       <div ref={end}/>
     </div>
-    <div className="composer-wrap"><div className="composer"><label htmlFor="daily-text" className="sr-only">Conte como foi seu dia</label><textarea id="daily-text" value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="Conte como foi seu dia…" rows={1}/><div className="composer-actions"><button className="mic" aria-label="Conversar por voz" title="Disponível em uma próxima etapa"><Mic size={20}/></button><span>Shift + Enter para nova linha</span><button className="send" onClick={() => void send()} disabled={!text.trim() || sending} aria-label="Enviar mensagem"><ArrowUp size={20}/></button></div></div><p className="privacy-note">Seu relato é privado e pode ser corrigido ou excluído.</p></div>
+    <div className="composer-wrap"><div className="composer"><label htmlFor="daily-text" className="sr-only">Conte como foi seu dia</label><textarea id="daily-text" value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="Conte como foi seu dia…" rows={1}/><div className="composer-actions"><button className="mic" onClick={() => setVoiceOpen(true)} disabled={sending} aria-label="Conversar por voz" aria-haspopup="dialog" aria-expanded={voiceOpen}><Mic size={20}/></button><span>Shift + Enter para nova linha</span><button className="send" onClick={() => void send()} disabled={!text.trim() || sending} aria-label="Enviar mensagem"><ArrowUp size={20}/></button></div></div><p className="privacy-note">Seu relato é privado e pode ser corrigido ou excluído.</p></div>
+    {voiceOpen && <VoiceCapture onClose={() => setVoiceOpen(false)} onUseTranscript={(transcript) => { setText((current) => [current.trim(), transcript.trim()].filter(Boolean).join(" ")); setVoiceOpen(false); }}/>} 
   </div>;
 }
 
