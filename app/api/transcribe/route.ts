@@ -25,6 +25,7 @@ export async function POST(request: Request) {
 
     const form = await request.formData();
     const audio = form.get("audio");
+    const durationMs = Number(form.get("duration_ms") ?? 0);
     if (!(audio instanceof File) || audio.size === 0 || audio.size > MAX_AUDIO_BYTES) {
       return NextResponse.json({ error: "Áudio inválido ou muito grande" }, { status: 400 });
     }
@@ -33,6 +34,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Formato de áudio não suportado" }, { status: 415 });
     }
 
+    console.info("[api/transcribe] audio received", {
+      bytes: audio.size,
+      type: baseType || "unknown",
+      durationMs: Number.isFinite(durationMs) ? durationMs : 0,
+    });
+
     const client = new OpenAI({ apiKey: openaiKey, maxRetries: 0, timeout: 45_000 });
     const result = await client.audio.transcriptions.create({
       file: audio,
@@ -40,7 +47,12 @@ export async function POST(request: Request) {
       language: "pt",
       prompt: "Transcreva em português brasileiro, preservando pontuação e nomes mencionados.",
     });
-    return NextResponse.json({ text: result.text });
+    const text = result.text.trim();
+    console.info("[api/transcribe] completed", { textLength: text.length });
+    if (!text) {
+      return NextResponse.json({ error: "Nenhuma fala detectada", code: "no_speech" }, { status: 422 });
+    }
+    return NextResponse.json({ text });
   } catch (error) {
     const details = error && typeof error === "object" ? error as Record<string, unknown> : {};
     const quotaUnavailable = details.code === "insufficient_quota";

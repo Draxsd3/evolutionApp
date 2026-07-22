@@ -1,9 +1,9 @@
 "use client";
 
 import { Check, Mic, MicOff, Pause, Play, ShieldCheck, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 
-type VoiceState = "consent" | "starting" | "listening" | "transcribing" | "paused" | "denied" | "unsupported" | "quota" | "error";
+type VoiceState = "consent" | "starting" | "listening" | "transcribing" | "paused" | "denied" | "unsupported" | "quota" | "no_speech" | "error";
 
 interface VoiceCaptureProps {
   token: string;
@@ -20,6 +20,7 @@ const stateCopy: Record<VoiceState, string> = {
   denied: "Microfone bloqueado",
   unsupported: "Navegador incompatível",
   quota: "Transcrição indisponível",
+  no_speech: "Nenhuma fala detectada",
   error: "Não foi possível transcrever",
 };
 
@@ -36,12 +37,22 @@ export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCapturePr
   const [voiceState, setVoiceState] = useState<VoiceState>("consent");
   const [transcript, setTranscript] = useState("");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [inputLevel, setInputLevel] = useState(0);
+  const [hasAudioSignal, setHasAudioSignal] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const discardRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const meterFrameRef = useRef<number | null>(null);
+  const recordingStartedAtRef = useRef(0);
 
   const releaseMicrophone = useCallback(() => {
+    if (meterFrameRef.current !== null) cancelAnimationFrame(meterFrameRef.current);
+    meterFrameRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    setInputLevel(0);
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     recorderRef.current = null;
@@ -55,7 +66,7 @@ export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCapturePr
     onClose();
   }, [onClose, releaseMicrophone]);
 
-  const transcribe = useCallback(async (blob: Blob) => {
+  const transcribe = useCallback(async (blob: Blob, durationMs: number) => {
     if (blob.size < 1_000) {
       setVoiceState("paused");
       return;
@@ -64,6 +75,7 @@ export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCapturePr
     const extension = blob.type.includes("mp4") ? "m4a" : "webm";
     const form = new FormData();
     form.append("audio", blob, `relato.${extension}`);
+    form.append("duration_ms", String(durationMs));
 
     try {
       const response = await fetch("/api/transcribe", {
@@ -73,7 +85,7 @@ export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCapturePr
       });
       const result = await response.json() as { text?: string; error?: string; code?: string };
       if (!response.ok) {
-        setVoiceState(result.code === "insufficient_quota" ? "quota" : "error");
+        setVoiceState(result.code === "insufficient_quota" ? "quota" : result.code === "no_speech" ? "no_speech" : "error");
         return;
       }
       setTranscript((current) => joinTranscript(current, result.text ?? ""));
@@ -97,6 +109,25 @@ export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCapturePr
       });
       const mimeType = preferredMimeType();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const audioContext = new AudioContext();
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      audioContext.createMediaStreamSource(stream).connect(analyser);
+      const samples = new Uint8Array(analyser.fftSize);
+      const updateMeter = () => {
+        analyser.getByteTimeDomainData(samples);
+        let sum = 0;
+        for (const sample of samples) {
+          const normalized = (sample - 128) / 128;
+          sum += normalized * normalized;
+        }
+        const level = Math.min(1, Math.sqrt(sum / samples.length) * 5);
+        setInputLevel(level);
+        if (level > 0.04) setHasAudioSignal(true);
+        meterFrameRef.current = requestAnimationFrame(updateMeter);
+      };
+      audioContextRef.current = audioContext;
+      updateMeter();
       streamRef.current = stream;
       recorderRef.current = recorder;
       recorder.ondataavailable = (event) => {
@@ -108,12 +139,15 @@ export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCapturePr
       };
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        const durationMs = Date.now() - recordingStartedAtRef.current;
         chunksRef.current = [];
         releaseMicrophone();
-        if (!discardRef.current) void transcribe(blob);
+        if (!discardRef.current) void transcribe(blob, durationMs);
       };
       recorder.start(500);
+      recordingStartedAtRef.current = Date.now();
       setRecordingSeconds(0);
+      setHasAudioSignal(false);
       setVoiceState("listening");
     } catch (error) {
       releaseMicrophone();
@@ -174,7 +208,7 @@ export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCapturePr
           <button className="voice-primary" onClick={() => void start()} autoFocus><Mic size={18}/> Ativar microfone</button>
         </div>
       </> : <>
-        <div className={`voice-indicator ${voiceState === "listening" ? "active" : ""}`} aria-hidden="true"><span/><span/><span/><span/></div>
+        <div className={`voice-indicator ${voiceState === "listening" ? "active" : ""}`} style={{ "--input-level": inputLevel } as CSSProperties} aria-hidden="true"><span/><span/><span/><span/></div>
         <p className="voice-state" aria-live="polite">{stateCopy[voiceState]}{voiceState === "listening" ? ` · ${minutes}:${seconds}` : ""}</p>
         <h2 id="voice-title">Conversa por voz</h2>
         <p id="voice-description" className="voice-description">
@@ -185,8 +219,10 @@ export function VoiceCapture({ token, onClose, onUseTranscript }: VoiceCapturePr
           {voiceState === "denied" && "Permita o microfone nas configurações do navegador e tente novamente."}
           {voiceState === "unsupported" && "Este navegador não permite capturar áudio. Use uma versão recente do Chrome, Edge ou Safari."}
           {voiceState === "quota" && "A conta da OpenAI está sem créditos para transcrever. Seu áudio não foi armazenado."}
+          {voiceState === "no_speech" && "Não encontramos voz nesse trecho. Confirme o microfone selecionado, aproxime-se e fale novamente."}
           {voiceState === "error" && "Verifique sua conexão e tente iniciar a captura novamente."}
         </p>
+        {voiceState === "listening" && recordingSeconds >= 2 && !hasAudioSignal && <p className="voice-signal-warning" role="status">Sinal muito baixo. Verifique se o microfone correto está ativo.</p>}
 
         <label className="voice-transcript-label" htmlFor="voice-transcript">Transcrição</label>
         <textarea id="voice-transcript" className="voice-transcript" value={transcript} onChange={(event) => setTranscript(event.target.value)} disabled={active} placeholder={voiceState === "listening" ? "Sua fala será transcrita ao pausar…" : "Sua fala aparecerá aqui."} rows={5}/>
